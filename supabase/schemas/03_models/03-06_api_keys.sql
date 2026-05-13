@@ -3,14 +3,18 @@ create table public.api_keys (
   organization_id uuid not null,
   role public.role default 'member'::public.role not null,
   name text not null,
-  key text not null,
+  -- key_prefix: first 8 chars of the original key, shown in the UI for identification.
+  -- key_hash: SHA-256 digest of the original key, used for authentication.
+  -- The plaintext key is never stored; it is shown to the user only once on creation.
+  key_prefix text not null,
+  key_hash bytea not null,
   created_at timestamp with time zone default now() not null,
   updated_at timestamp with time zone default now() not null
 );
 
 alter table only public.api_keys
-add constraint api_keys_key_key
-unique (key);
+add constraint api_keys_key_hash_key
+unique (key_hash);
 
 alter table only public.api_keys
 add constraint api_keys_pkey

@@ -10,7 +10,10 @@ on public.api_keys
 for select
 to authenticated, anon
 using (
-  key = current_setting('request.headers', true)::json->>'api-key'
+  key_hash = extensions.digest(
+    current_setting('request.headers', true)::json->>'api-key',
+    'sha256'
+  )
   or organization_id in (
     select public.get_authorized_orgs('owner')
   )

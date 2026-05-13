@@ -4,6 +4,7 @@ import { McpServer } from "npm:@modelcontextprotocol/sdk@1.25.3/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "npm:@modelcontextprotocol/sdk@1.25.3/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { createApiClient, type Database } from "../_shared/supabase.ts";
+import { hashApiKey } from "../_shared/api_keys.ts";
 import * as log from "../_shared/logger.ts";
 import * as tools from "./tools.ts";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -29,10 +30,11 @@ app.use("*", async (c, next) => {
 
     const token = c.req.header("Authorization")!.replace("Bearer ", "");
 
+    const keyHash = await hashApiKey(token);
     const { data: apiKey, error: apiKeyError } = await supabase
       .from("api_keys")
       .select("organization_id")
-      .eq("key", token)
+      .eq("key_hash", keyHash)
       .maybeSingle();
 
     if (apiKeyError || !apiKey) {
@@ -72,6 +74,32 @@ app.use("*", async (c, next) => {
 });
 
 /**
+ * Wraps a MCP tool handler so that thrown errors are returned as
+ * { isError: true, content: [{ type: "text", text: errorMessage }] }
+ * instead of propagating as protocol-level failures.
+ * This lets the LLM see the error and potentially retry with corrected params.
+ */
+function mcpTool<T>(
+  fn: (args: T) => Promise<{ content: { type: "text"; text: string }[] }>,
+): (args: T) => Promise<{
+  isError?: boolean;
+  content: { type: "text"; text: string }[];
+}> {
+  return async (args: T) => {
+    try {
+      return await fn(args);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn("MCP tool error", { error: message });
+      return {
+        isError: true,
+        content: [{ type: "text" as const, text: `Error: ${message}` }],
+      };
+    }
+  };
+}
+
+/**
  * Creates an McpServer instance with all tools registered.
  * A new server+transport is created per request (Edge Functions are stateless).
  */
@@ -99,7 +127,7 @@ function createMcpServer(
         ),
       },
     },
-    async ({ limit, account_phone }) => {
+    mcpTool(async ({ limit, account_phone }) => {
       const result = await tools.listConversations({
         supabase,
         orgId,
@@ -112,7 +140,7 @@ function createMcpServer(
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
-    },
+    }),
   );
 
   server.registerTool(
@@ -128,7 +156,7 @@ function createMcpServer(
         limit: z.number().optional().describe("Max messages (default: 10)"),
       },
     },
-    async ({ contact_phone, account_phone, limit }) => {
+    mcpTool(async ({ contact_phone, account_phone, limit }) => {
       const result = await tools.fetchConversation({
         supabase,
         orgId,
@@ -142,7 +170,7 @@ function createMcpServer(
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
-    },
+    }),
   );
 
   server.registerTool(
@@ -160,7 +188,7 @@ function createMcpServer(
         limit: z.number().optional().describe("Max contacts (default: 10)"),
       },
     },
-    async ({ name, number, limit }) => {
+    mcpTool(async ({ name, number, limit }) => {
       const result = await tools.searchContacts({
         supabase,
         orgId,
@@ -173,7 +201,7 @@ function createMcpServer(
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
-    },
+    }),
   );
 
   server.registerTool(
@@ -182,7 +210,7 @@ function createMcpServer(
       description: "List connected WhatsApp accounts.",
       inputSchema: {},
     },
-    async () => {
+    mcpTool(async () => {
       const result = await tools.listAccounts({
         supabase,
         orgId,
@@ -192,7 +220,7 @@ function createMcpServer(
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
-    },
+    }),
   );
 
   server.registerTool(
@@ -205,7 +233,7 @@ function createMcpServer(
         ),
       },
     },
-    async ({ account_phone }) => {
+    mcpTool(async ({ account_phone }) => {
       const result = await tools.listTemplates({
         supabase,
         orgId,
@@ -216,7 +244,7 @@ function createMcpServer(
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
-    },
+    }),
   );
 
   server.registerTool(
@@ -230,7 +258,7 @@ function createMcpServer(
         ),
       },
     },
-    async ({ template_id, account_phone }) => {
+    mcpTool(async ({ template_id, account_phone }) => {
       const result = await tools.fetchTemplate({
         supabase,
         orgId,
@@ -242,7 +270,7 @@ function createMcpServer(
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
-    },
+    }),
   );
 
   server.registerTool(
@@ -258,7 +286,7 @@ function createMcpServer(
         ),
       },
     },
-    async ({ contact_phone, content, account_phone }) => {
+    mcpTool(async ({ contact_phone, content, account_phone }) => {
       const result = await tools.sendMessage({
         supabase,
         orgId,
@@ -272,7 +300,7 @@ function createMcpServer(
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
-    },
+    }),
   );
 
   return server;

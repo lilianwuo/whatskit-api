@@ -47,7 +47,7 @@ begin
   if api_key is not null then
     select a.organization_id into org_id
     from public.api_keys a
-    where a.key = api_key
+    where a.key_hash = extensions.digest(api_key, 'sha256')
     and (
       case (a.role::text)
         when 'owner' then 3
@@ -59,12 +59,6 @@ begin
     if org_id is not null then
       return next org_id;
     end if;
-    -- Same reasoning as the JWT branch: invalid key or insufficient role returns
-    -- the empty set, not a raise. Validate api-key existence at the request edge
-    -- (e.g. a pre-request hook) if you want loud failure for missing/invalid keys.
-    -- raise exception using
-    --   errcode = '42501',
-    --   message = format('invalid api key or insufficient permissions, %s role required', role::text);
     return;
   end if;
 

@@ -11,6 +11,7 @@ import {
   createUnsecureClient,
   type TemplateData,
 } from "../_shared/supabase.ts";
+import { hashApiKey } from "../_shared/api_keys.ts";
 import {
   createTemplate,
   deleteTemplate,
@@ -87,10 +88,11 @@ app.use("*", async (c, next) => {
 
   const client = createApiClient(c.req.raw);
 
+  const keyHash = await hashApiKey(token);
   const { data: apiKey, error: apiKeyError } = await client
     .from("api_keys")
     .select()
-    .eq("key", token)
+    .eq("key_hash", keyHash)
     .maybeSingle();
 
   if (apiKeyError || !apiKey) {
