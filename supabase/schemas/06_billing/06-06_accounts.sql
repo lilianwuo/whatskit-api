@@ -1,6 +1,7 @@
 create table billing.accounts (
   id uuid default gen_random_uuid() not null,
   name text not null,
+  extra jsonb,
   created_at timestamp with time zone default now() not null,
   updated_at timestamp with time zone default now() not null
 );

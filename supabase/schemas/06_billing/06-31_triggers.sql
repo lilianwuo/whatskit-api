@@ -72,3 +72,11 @@ after insert
 on billing.ledger
 for each row
 execute function billing.process_ledger_entry();
+
+-- Renew expired subscriptions every day at 00:05 UTC.
+-- The 5-minute offset avoids clock-edge race conditions with period_end timestamps.
+select cron.schedule(
+  'billing-renewal',
+  '5 0 * * *',
+  $$select billing.renew_subscriptions()$$
+);

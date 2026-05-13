@@ -294,7 +294,9 @@ end;
 $$;
 
 -- Change plan for an organization.
--- Updates tier (from plan's min_tier) and plan, sets period start, grants balance products.
+-- Upgrades (new plan min_tier >= current tier level) apply immediately.
+-- Downgrades (new plan min_tier < current tier level) are deferred: the new plan
+-- is stored in pending_plan_id and applied at the next period end by renew_subscriptions().
 -- Called by the app layer (service_role).
 create function billing.change_plan(
   _organization_id uuid,
@@ -305,17 +307,18 @@ security definer
 set search_path to ''
 as $$
 declare
-  _plan billing.plans%rowtype;
-  _tier_id text;
-  _pp record;
+  _plan      billing.plans%rowtype;
+  _tier_id   text;
+  _cur_level int;
+  _pp        record;
 begin
-  -- Get the plan
+  -- Get the target plan
   select * into strict _plan
   from billing.plans p
   where p.id = _plan_id
     and p.active = true;
 
-  -- Find the matching tier for this plan's min_tier level
+  -- Find the lowest active tier that satisfies the plan's min_tier requirement
   select t.id into _tier_id
   from billing.tiers t
   where t.level >= _plan.min_tier
@@ -327,10 +330,26 @@ begin
     raise exception 'No active tier found for plan %', _plan_id;
   end if;
 
-  -- Update subscription
+  -- Get the current tier level so we can detect a downgrade
+  select t.level into _cur_level
+  from billing.subscriptions s
+  join billing.tiers t on t.id = s.tier_id
+  where s.organization_id = _organization_id;
+
+  -- Downgrade: new plan requires a lower tier than the current one.
+  -- Defer the change so the org keeps its current benefits until period end.
+  if _cur_level is not null and _plan.min_tier < _cur_level then
+    update billing.subscriptions
+    set pending_plan_id = _plan_id
+    where organization_id = _organization_id;
+    return;
+  end if;
+
+  -- Upgrade (or initial assignment / renewal): apply immediately.
   update billing.subscriptions
-  set tier_id = _tier_id,
-      plan_id = _plan_id,
+  set tier_id             = _tier_id,
+      plan_id             = _plan_id,
+      pending_plan_id     = null,
       current_period_start = now()
   where organization_id = _organization_id;
 
@@ -350,3 +369,203 @@ begin
 end;
 $$;
 
+-- Renew subscriptions whose billing period has ended.
+-- Called by a daily cron job.
+-- For each expired subscription:
+--   1. If a pending_plan_id exists (deferred downgrade), applies it first and clears the field.
+--   2. Rotates current_period_start/end forward by one billing cycle.
+--   3. Re-grants balance products by calling billing.change_plan().
+-- Subscriptions without a plan (free tier) are skipped — no renewal needed.
+create function billing.renew_subscriptions() returns void
+language plpgsql
+security definer
+set search_path to ''
+as $$
+declare
+  _sub   record;
+  _cycle interval;
+begin
+  for _sub in
+    select
+      s.organization_id,
+      s.plan_id,
+      s.pending_plan_id,
+      s.current_period_end,
+      p.billing_cycle
+    from billing.subscriptions s
+    join billing.plans p on p.id = s.plan_id
+    where s.current_period_end is not null
+      and s.current_period_end <= now()
+      and p.active = true
+  loop
+    -- Apply deferred downgrade if one is pending.
+    -- We clear pending_plan_id first so that change_plan() below
+    -- sees the new (lower) tier and treats it as a regular renewal.
+    if _sub.pending_plan_id is not null then
+      update billing.subscriptions
+      set plan_id         = _sub.pending_plan_id,
+          pending_plan_id = null
+      where organization_id = _sub.organization_id;
+
+      -- Use the pending plan for the rest of this renewal cycle.
+      _sub.plan_id := _sub.pending_plan_id;
+    end if;
+
+    -- Determine cycle length from the (possibly updated) plan
+    select case p.billing_cycle
+      when 'month' then interval '1 month'
+      when 'year'  then interval '1 year'
+      else              interval '1 month'
+    end into _cycle
+    from billing.plans p
+    where p.id = _sub.plan_id;
+
+    -- Advance the period window before re-granting,
+    -- so change_plan() sees the correct new period.
+    update billing.subscriptions
+    set
+      current_period_start = _sub.current_period_end,
+      current_period_end   = _sub.current_period_end + _cycle
+    where organization_id = _sub.organization_id;
+
+    -- Generate invoice for the closing period before renewing.
+    perform billing.generate_invoice(
+      _sub.organization_id,
+      _sub.current_period_end - _cycle,
+      _sub.current_period_end
+    );
+
+    -- Re-grant balance products (AI credits, message allowance, etc.)
+    perform billing.change_plan(_sub.organization_id, _sub.plan_id);
+  end loop;
+end;
+$$;
+
+-- Generate an invoice for a closed billing period.
+-- Creates one billing.invoices row and multiple billing.invoices_items rows:
+--   'plan'    — fixed plan fee (even if $0, for record-keeping)
+--   'overage' — counter products used above the plan's included quantity
+--   'credit'  — balance products (ai_credits) consumed during the period
+-- Called automatically by renew_subscriptions() before each renewal.
+create function billing.generate_invoice(
+  _organization_id uuid,
+  _period_start    timestamptz,
+  _period_end      timestamptz
+) returns uuid
+language plpgsql
+security definer
+set search_path to ''
+as $$
+declare
+  _invoice_id  uuid;
+  _plan        billing.plans%rowtype;
+  _subtotal    numeric := 0;
+  _pp          record;
+  _used        numeric;
+  _included    numeric;
+  _overage_qty numeric;
+  _overage_amt numeric;
+  _credit_amt  numeric;
+  _period_date date;
+begin
+  -- Get the active plan for this organization
+  select p.* into _plan
+  from billing.subscriptions s
+  join billing.plans p on p.id = s.plan_id
+  where s.organization_id = _organization_id;
+
+  if not found then
+    return null; -- No subscription, no invoice
+  end if;
+
+  -- Create the invoice in draft state
+  insert into billing.invoices (organization_id, period_start, period_end, status, subtotal)
+  values (_organization_id, _period_start, _period_end, 'draft', 0)
+  returning id into _invoice_id;
+
+  -- ── Line item: plan fee ─────────────────────────────────────────────────────
+  insert into billing.invoices_items
+    (invoice_id, type, plan_id, quantity, unit_price, amount)
+  values
+    (_invoice_id, 'plan', _plan.id, 1, _plan.price, _plan.price);
+
+  _subtotal := _subtotal + _plan.price;
+
+  -- ── Line items: counter overages (messages, conversations, etc.) ────────────
+  -- period date for monthly usage lookup
+  _period_date := date_trunc('month', _period_start)::date;
+
+  for _pp in
+    select
+      pp.product_id,
+      pp.included,
+      pp.unit_price
+    from billing.plans_products pp
+    join billing.products p on p.id = pp.product_id
+    where pp.plan_id    = _plan.id
+      and p.kind        = 'counter'
+      and pp.interval   = 'month'
+      and pp.unit_price is not null
+      and pp.unit_price > 0
+  loop
+    -- Actual monthly usage
+    select coalesce(u.quantity, 0) into _used
+    from billing.usage u
+    where u.organization_id = _organization_id
+      and u.product_id      = _pp.product_id
+      and u.interval        = 'month'
+      and u.period          = _period_date;
+
+    _included    := coalesce(_pp.included, 0);
+    _overage_qty := greatest(_used - _included, 0);
+    _overage_amt := _overage_qty * _pp.unit_price;
+
+    if _overage_qty > 0 then
+      insert into billing.invoices_items
+        (invoice_id, type, product_id, quantity, unit_price, amount)
+      values
+        (_invoice_id, 'overage', _pp.product_id, _overage_qty, _pp.unit_price, _overage_amt);
+
+      _subtotal := _subtotal + _overage_amt;
+    end if;
+  end loop;
+
+  -- ── Line items: balance consumption (ai_credits) ────────────────────────────
+  -- Sum all billable ledger consumption entries in the period.
+  for _pp in
+    select
+      pp.product_id,
+      pp.unit_price
+    from billing.plans_products pp
+    join billing.products p on p.id = pp.product_id
+    where pp.plan_id  = _plan.id
+      and p.kind      = 'balance'
+  loop
+    select coalesce(sum(abs(l.quantity)), 0) into _credit_amt
+    from billing.ledger l
+    where l.organization_id = _organization_id
+      and l.product_id      = _pp.product_id
+      and l.type            = 'consumption'
+      and l.billable        = true
+      and l.created_at      >= _period_start
+      and l.created_at      <  _period_end;
+
+    if _credit_amt > 0 then
+      insert into billing.invoices_items
+        (invoice_id, type, product_id, quantity, unit_price, amount)
+      values
+        (_invoice_id, 'credit', _pp.product_id, _credit_amt, 1, _credit_amt);
+
+      _subtotal := _subtotal + _credit_amt;
+    end if;
+  end loop;
+
+  -- ── Update invoice subtotal and mark as issued ───────────────────────────────
+  update billing.invoices
+  set subtotal = _subtotal,
+      status   = 'issued'
+  where id = _invoice_id;
+
+  return _invoice_id;
+end;
+$$;

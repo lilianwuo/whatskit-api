@@ -381,6 +381,83 @@ async function postPayloadToWhatsAppEndpoint({
   return await response.json();
 }
 
+/**
+ * Records the WhatsApp template send cost in the billing ledger.
+ * Looks up the unit price from billing.costs (provider='whatsapp', product=<category>/<country_code>).
+ * Non-fatal: a missing costs row simply skips the ledger entry and logs a warning.
+ */
+async function recordTemplateCost({
+  client,
+  message,
+}: {
+  client: ReturnType<typeof createUnsecureClient>;
+  message: MessageRow;
+}): Promise<void> {
+  const content = message.content as { kind: string; data?: { category?: string } };
+  if (content?.kind !== "template") return;
+
+  // WhatsApp template category: marketing | utility | authentication
+  const category = (content.data?.category ?? "utility").toLowerCase();
+
+  // Country code derived from the recipient phone number prefix.
+  // Currently defaulting to 'ar' (Argentina). Extend with a lookup table as needed.
+  const country_code = "ar";
+  const product = `${category}/${country_code}`;
+
+  const { data: costs } = await client
+    .schema("billing")
+    .from("costs")
+    .select("pricing, quantity")
+    .eq("provider", "whatsapp")
+    .eq("product", product)
+    .lte("effective_at", new Date().toISOString())
+    .order("effective_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+    .throwOnError();
+
+  if (!costs) {
+    log.warn("No billing cost found for WhatsApp template, skipping ledger", {
+      product,
+      message_id: message.id,
+    });
+    return;
+  }
+
+  const pricing = costs.pricing as { price?: number };
+  const unit_price = pricing?.price ?? 0;
+  if (unit_price === 0) return;
+
+  const { error } = await client
+    .schema("billing")
+    .from("ledger")
+    .insert({
+      organization_id: message.organization_id,
+      product_id: "ai_credits",
+      type: "consumption",
+      quantity: -unit_price,
+      message_id: message.id,
+      provider: "whatsapp",
+      model: product,
+      metadata: { category, country_code },
+      billable: true,
+    });
+
+  if (error) {
+    // Non-fatal: log and continue — the message was already sent successfully.
+    log.warn("Failed to record template billing ledger entry", {
+      message_id: message.id,
+      error: error.message,
+    });
+  } else {
+    log.info("Recorded template billing", {
+      message_id: message.id,
+      product,
+      quantity: -unit_price,
+    });
+  }
+}
+
 Deno.serve(async (req) => {
   const authHeader = req.headers.get("Authorization");
   const token = authHeader?.replace("Bearer ", "");
@@ -441,6 +518,9 @@ Deno.serve(async (req) => {
         })
         .eq("id", message.id)
         .throwOnError();
+
+      // Record template send cost in the billing ledger (non-fatal).
+      await recordTemplateCost({ client, message });
     } catch (error) {
       const isWhatsAppError = error instanceof WhatsAppError;
       const errorMessage = error instanceof Error

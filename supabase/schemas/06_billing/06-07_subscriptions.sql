@@ -2,6 +2,7 @@ create table billing.subscriptions (
   organization_id uuid not null,
   tier_id text not null,
   plan_id text,
+  pending_plan_id text,
   account_id uuid,
   current_period_start timestamp with time zone,
   current_period_end timestamp with time zone,
@@ -27,6 +28,11 @@ references billing.tiers(id);
 alter table only billing.subscriptions
 add constraint subscriptions_plan_id_fkey
 foreign key (plan_id)
+references billing.plans(id);
+
+alter table only billing.subscriptions
+add constraint subscriptions_pending_plan_id_fkey
+foreign key (pending_plan_id)
 references billing.plans(id);
 
 alter table only billing.subscriptions
