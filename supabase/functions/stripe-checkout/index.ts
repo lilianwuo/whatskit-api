@@ -18,9 +18,9 @@ import { HTTPException } from "jsr:@hono/hono/http-exception";
 import Stripe from "stripe";
 import * as log from "../_shared/logger.ts";
 import {
+  type ApiKeyRow,
   createClient,
   createUnsecureClient,
-  type ApiKeyRow,
 } from "../_shared/supabase.ts";
 import { type User } from "@supabase/supabase-js";
 
@@ -118,7 +118,8 @@ app.post("/stripe-checkout", async (c) => {
 
   if (!stripePriceId) {
     throw new HTTPException(422, {
-      message: `Plan '${plan_id}' has no Stripe price_id configured. Set billing.plans.extra->>'stripe_price_id'.`,
+      message:
+        `Plan '${plan_id}' has no Stripe price_id configured. Set billing.plans.extra->>'stripe_price_id'.`,
     });
   }
 
@@ -127,7 +128,9 @@ app.post("/stripe-checkout", async (c) => {
     throw new HTTPException(500, { message: "STRIPE_SECRET_KEY not set" });
   }
 
-  const stripe = new Stripe(stripeKey, { apiVersion: "2025-03-31.basil" });
+  const stripe = new Stripe(stripeKey, {
+    apiVersion: "2025-03-31.basil" as any,
+  });
 
   // Look up or create a Stripe customer linked to this organization
   const { data: subscription } = await unsecureClient

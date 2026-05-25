@@ -22,7 +22,9 @@ import { createUnsecureClient } from "../_shared/supabase.ts";
 const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY")!;
 const STRIPE_WEBHOOK_SECRET = Deno.env.get("STRIPE_WEBHOOK_SECRET")!;
 
-const stripe = new Stripe(STRIPE_SECRET_KEY, { apiVersion: "2025-03-31.basil" });
+const stripe = new Stripe(STRIPE_SECRET_KEY, {
+  apiVersion: "2025-03-31.basil" as any,
+});
 
 Deno.serve(async (req) => {
   const signature = req.headers.get("stripe-signature");
@@ -241,9 +243,12 @@ Deno.serve(async (req) => {
               error: error.message,
             });
           } else {
-            log.info("Org downgraded to free plan after subscription deletion", {
-              organization_id,
-            });
+            log.info(
+              "Org downgraded to free plan after subscription deletion",
+              {
+                organization_id,
+              },
+            );
           }
         }
         break;
