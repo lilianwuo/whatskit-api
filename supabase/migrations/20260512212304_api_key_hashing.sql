@@ -13,30 +13,73 @@
 -- regenerate their keys — the same key string will now be hashed on each request.
 
 -- Step 1: Add new columns (nullable initially for backfill)
+-- IF NOT EXISTS: on a fresh DB these columns already exist from the schema file.
 alter table public.api_keys
-add column key_prefix text,
-add column key_hash bytea;
+add column if not exists key_prefix text,
+add column if not exists key_hash bytea;
 
--- Step 2: Backfill from existing plaintext key
-update public.api_keys
-set
-  key_prefix = left(key, 10),
-  key_hash   = extensions.digest(key, 'sha256');
+-- Step 2: Backfill from existing plaintext key (only when old key column still exists)
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public'
+      and table_name   = 'api_keys'
+      and column_name  = 'key'
+  ) then
+    update public.api_keys
+    set
+      key_prefix = left(key, 10),
+      key_hash   = extensions.digest(key, 'sha256')
+    where key_prefix is null or key_hash is null;
+  end if;
+end;
+$$;
 
 -- Step 3: Enforce not-null and unique constraints
+-- Use DO blocks because ADD CONSTRAINT IF NOT EXISTS is not valid PostgreSQL syntax.
+do $$
+begin
+  -- Set not null on key_prefix if the column exists and is nullable
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public'
+      and table_name   = 'api_keys'
+      and column_name  = 'key_prefix'
+      and is_nullable  = 'YES'
+  ) then
+    alter table public.api_keys alter column key_prefix set not null;
+  end if;
+
+  -- Set not null on key_hash if the column exists and is nullable
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public'
+      and table_name   = 'api_keys'
+      and column_name  = 'key_hash'
+      and is_nullable  = 'YES'
+  ) then
+    alter table public.api_keys alter column key_hash set not null;
+  end if;
+
+  -- Add unique constraint only if it doesn't already exist
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.api_keys'::regclass
+      and conname  = 'api_keys_key_hash_key'
+  ) then
+    alter table public.api_keys
+    add constraint api_keys_key_hash_key unique (key_hash);
+  end if;
+end;
+$$;
+
+-- Step 4: Drop the plaintext key column and its old unique constraint (only if they exist)
 alter table public.api_keys
-alter column key_prefix set not null,
-alter column key_hash set not null;
+drop constraint if exists api_keys_key_key;
 
 alter table public.api_keys
-add constraint api_keys_key_hash_key unique (key_hash);
-
--- Step 4: Drop the plaintext key column and its old unique constraint
-alter table public.api_keys
-drop constraint api_keys_key_key;
-
-alter table public.api_keys
-drop column key;
+drop column if exists key cascade; -- drops dependent RLS policies; Step 6 recreates them
 
 -- Step 5: Update get_authorized_orgs() to compare hashes
 set check_function_bodies = off;

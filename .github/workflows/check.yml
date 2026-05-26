@@ -17,3 +17,5 @@ jobs:
       - run: deno lint
       - run: cd supabase/functions && deno check .
       - run: cd plugin && deno check .
+      - name: Run unit tests
+        run: cd supabase/functions && deno test --allow-env --allow-read

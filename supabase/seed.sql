@@ -144,8 +144,10 @@ insert into public.agents (name, user_id, organization_id, ai, extra) values
 ;
 
 -- API Keys (for Mountain Peaks)
-insert into public.api_keys (organization_id, key, role, name) values
-  ('3a182d8d-d6d8-44bd-b021-029915476b8c', '1234567890', 'member', 'Default')
+-- key_prefix: first 10 chars of the original key shown in UI
+-- key_hash: SHA-256 digest used for authentication (key = '1234567890')
+insert into public.api_keys (organization_id, key_prefix, key_hash, role, name) values
+  ('3a182d8d-d6d8-44bd-b021-029915476b8c', '1234567890', extensions.digest('1234567890', 'sha256'), 'member', 'Default')
 ;
 
 -- Onboarding Tokens (for Mountain Peaks - created by Goat)
