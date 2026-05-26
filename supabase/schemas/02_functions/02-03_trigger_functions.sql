@@ -180,8 +180,6 @@ begin
 end;
 $$;
 
--- BEFORE trigger: creates contact on ADD, unlinks on REMOVE.
--- Must stay BEFORE to modify new.contact_id.
 create function public.manage_contact_on_address_sync() returns trigger
 language plpgsql
 set search_path = ''
@@ -203,6 +201,17 @@ begin
         new.extra->'synced'->>'name'
       ) returning id into new.contact_id;
     end if;
+  end if;
+
+  -- General Case: If contact_id is still null and we have a name (from sync or webhook/profile extra) or fallback
+  if new.contact_id is null then
+    insert into public.contacts (
+      organization_id,
+      name
+    ) values (
+      new.organization_id,
+      coalesce(new.extra->>'name', new.extra->'synced'->>'name', 'Contacto Sin Nombre')
+    ) returning id into new.contact_id;
   end if;
 
   -- Case 2: Synced Action = REMOVE
