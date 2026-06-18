@@ -49,9 +49,15 @@ export async function listTemplates(
   );
 
   if (!response.ok) {
+    const cause = await response.json().catch(() => ({}));
+    log.error("Could not fetch templates from Meta", {
+      status: response.status,
+      waba_id,
+      cause,
+    });
     throw new HTTPException(response.status as ContentfulStatusCode, {
       message: "Could not fetch templates",
-      cause: await response.json().catch(() => ({})),
+      cause,
     });
   }
 

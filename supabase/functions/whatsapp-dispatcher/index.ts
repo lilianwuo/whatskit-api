@@ -520,7 +520,18 @@ Deno.serve(async (req) => {
         .throwOnError();
 
       // Record template send cost in the billing ledger (non-fatal).
-      await recordTemplateCost({ client, message });
+      // Wrapped so a billing failure (e.g. schema not exposed) can never bubble
+      // up to the dispatch catch and wrongly mark a delivered message as failed.
+      try {
+        await recordTemplateCost({ client, message });
+      } catch (costError) {
+        log.warn("recordTemplateCost failed (non-fatal)", {
+          message_id: message.id,
+          error: costError instanceof Error
+            ? costError.message
+            : String(costError),
+        });
+      }
     } catch (error) {
       const isWhatsAppError = error instanceof WhatsAppError;
       const errorMessage = error instanceof Error
