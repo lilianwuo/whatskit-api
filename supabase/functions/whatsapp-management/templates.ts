@@ -142,6 +142,77 @@ export async function createTemplate(
   return await response.json();
 }
 
+/**
+ * Uploads a media sample for a template header and returns the resulting
+ * `header_handle`, which Meta requires when creating IMAGE/VIDEO/DOCUMENT
+ * header templates. Uses the Graph Resumable Upload API (two steps):
+ *   1. start an upload session on the app
+ *   2. POST the file bytes and read back the handle (`h`)
+ */
+export async function uploadTemplateSample(
+  client: SupabaseClient<Database>,
+  organization_id: string,
+  organization_address: string,
+  file: { bytes: Uint8Array; type: string },
+): Promise<{ handle: string }> {
+  const { access_token } = await getBusinessCredentials(
+    client,
+    organization_id,
+    organization_address,
+  );
+
+  // Multiple Meta apps may be configured pipe-separated; use the first.
+  const app_id = Deno.env.get("META_APP_ID")?.split("|")[0];
+
+  if (!app_id) {
+    throw new HTTPException(500, { message: "META_APP_ID is not configured" });
+  }
+
+  // Step 1: start an upload session.
+  const sessionResponse = await fetch(
+    `https://graph.facebook.com/${API_VERSION}/${app_id}/uploads?file_length=${file.bytes.length}&file_type=${
+      encodeURIComponent(file.type)
+    }`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${access_token}` },
+    },
+  );
+
+  if (!sessionResponse.ok) {
+    throw new HTTPException(sessionResponse.status as ContentfulStatusCode, {
+      message: "Could not start media upload",
+      cause: await sessionResponse.json().catch(() => ({})),
+    });
+  }
+
+  const { id: session_id } = await sessionResponse.json();
+
+  // Step 2: upload the bytes (note the OAuth scheme and file_offset header).
+  const uploadResponse = await fetch(
+    `https://graph.facebook.com/${API_VERSION}/${session_id}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `OAuth ${access_token}`,
+        file_offset: "0",
+      },
+      body: file.bytes,
+    },
+  );
+
+  if (!uploadResponse.ok) {
+    throw new HTTPException(uploadResponse.status as ContentfulStatusCode, {
+      message: "Could not upload media sample",
+      cause: await uploadResponse.json().catch(() => ({})),
+    });
+  }
+
+  const { h } = await uploadResponse.json();
+
+  return { handle: h };
+}
+
 export async function editTemplate(
   client: SupabaseClient<Database>,
   organization_id: string,

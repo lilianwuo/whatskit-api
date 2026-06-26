@@ -24,6 +24,13 @@ export type OrganizationExtra = {
   default_agent_id?: string;
   media_preprocessing?: PreprocessingConfig;
   error_messages_direction?: "internal" | "outgoing";
+  // Informational monthly budget shown on the statistics screen.
+  // Visualization only — it never blocks sending.
+  budget?: {
+    messages?: number;
+    cost?: number;
+    currency?: string;
+  };
 };
 
 export type OrganizationAddressExtra = {
@@ -40,6 +47,7 @@ export type ConversationExtra = {
   archived?: string;
   pinned?: string;
   default_agent_id?: string;
+  tags?: string[]; // ids of public.tags; used to segment/differentiate leads
 };
 
 export type ContactExtra = Record<PropertyKey, never>;

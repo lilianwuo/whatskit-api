@@ -18,6 +18,7 @@ import {
   editTemplate,
   fetchTemplate,
   listTemplates,
+  uploadTemplateSample,
 } from "./templates.ts";
 import {
   deleteSignup,
@@ -272,6 +273,67 @@ app.delete(
     return c.json(response);
   },
 );
+
+// Media sample upload for template headers (multipart/form-data).
+// Auth is handled inline because requireRoles reads a JSON body, which would
+// fail for a multipart request.
+app.post("/whatsapp-management/templates/media", async (c) => {
+  const client = c.get("supabase");
+  const user = c.get("user");
+  const apiKey = c.get("apiKey");
+
+  const form = await c.req.formData();
+  const organization_id = String(form.get("organization_id") ?? "");
+  const organization_address = String(form.get("organization_address") ?? "");
+  const file = form.get("file");
+
+  if (!organization_id || !organization_address || !(file instanceof File)) {
+    throw new HTTPException(400, {
+      message: "Missing organization_id, organization_address or file",
+    });
+  }
+
+  const roles = ["admin", "owner"] as const;
+
+  if (user) {
+    const { data: agent, error } = await client
+      .from("agents")
+      .select("organization_id")
+      .eq("user_id", user.id)
+      .eq("organization_id", organization_id)
+      .in("extra->>role", roles as unknown as string[])
+      .maybeSingle();
+
+    if (error || !agent) {
+      throw new HTTPException(403, {
+        message:
+          `User ${user.id} not authorized for organization ${organization_id}`,
+      });
+    }
+  } else if (apiKey) {
+    if (
+      organization_id !== apiKey.organization_id ||
+      !roles.includes(apiKey.role as "admin" | "owner")
+    ) {
+      throw new HTTPException(403, {
+        message: `API key not authorized for organization ${organization_id}`,
+      });
+    }
+  } else {
+    throw new HTTPException(401, { message: "Unauthorized" });
+  }
+
+  const bytes = new Uint8Array(await file.arrayBuffer());
+
+  const result = await uploadTemplateSample(
+    client,
+    organization_id,
+    organization_address,
+    { bytes, type: file.type },
+  );
+
+  return c.json(result);
+});
 
 // Embedded signup routes
 

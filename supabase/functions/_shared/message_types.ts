@@ -346,7 +346,7 @@ export type TemplateData = {
     | "DISABLED"
     | "PAUSED"
     | "LIMIT_EXCEEDED";
-  category: "MARKETING"; // TODO: service and auth categories - cabra 2024/09/12
+  category: "MARKETING" | "UTILITY" | "AUTHENTICATION";
   language: string;
   components: (
     | BodyComponent
@@ -359,10 +359,13 @@ export type TemplateData = {
 
 type HeaderComponent = {
   type: "HEADER";
-  text: string;
-  format: "TEXT"; // TODO: other formats such as image - cabra 2024/09/12
+  format: "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT";
+  text?: string; // only present for TEXT headers
   example?: {
-    header_text: [string];
+    header_text?: [string];
+    // Media sample handle obtained from the resumable upload API,
+    // required by Meta when creating IMAGE/VIDEO/DOCUMENT header templates.
+    header_handle?: [string];
   };
 };
 
@@ -381,13 +384,16 @@ type FooterComponent = {
 
 type ButtonsComponent = {
   type: "BUTTONS";
-  buttons: QuickReply[]; // TODO: call to action buttons - cabra 2024/09/12
+  buttons: TemplateButtonDef[];
 };
 
-type QuickReply = {
-  type: "QUICK_REPLY";
-  text: string;
-};
+// Button definitions used when creating a template (distinct from the
+// send-time TemplateButton parameters further below).
+type TemplateButtonDef =
+  | { type: "QUICK_REPLY"; text: string }
+  | { type: "URL"; text: string; url: string; example?: string[] }
+  | { type: "PHONE_NUMBER"; text: string; phone_number: string }
+  | { type: "COPY_CODE"; example: string };
 
 // Template message, used to send a template message
 

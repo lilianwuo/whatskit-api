@@ -111,3 +111,80 @@ begin
   );
 end;
 $$;
+
+-- Reporting overview for the statistics screen: daily message buckets,
+-- period totals, and the estimated WhatsApp template spend.
+-- security invoker so the caller's RLS scopes data to their own organization.
+create function public.report_overview(
+  p_organization_id uuid,
+  p_from timestamptz,
+  p_to timestamptz
+)
+returns json
+language plpgsql
+stable
+security invoker
+set search_path to ''
+as $$
+declare
+  _series json;
+  _totals json;
+  _cost numeric;
+begin
+  -- Daily buckets: sent (outgoing reached 'sent'), failed, replies (incoming).
+  with daily as (
+    select
+      date_trunc('day', m.timestamp) as day,
+      count(*) filter (
+        where m.direction = 'outgoing' and m.status ? 'sent'
+      ) as sent,
+      count(*) filter (
+        where m.status ? 'failed'
+      ) as failed,
+      count(*) filter (
+        where m.direction = 'incoming'
+      ) as replies
+    from public.messages m
+    where m.organization_id = p_organization_id
+      and m.timestamp >= p_from
+      and m.timestamp < p_to
+    group by 1
+    order by 1
+  )
+  select coalesce(json_agg(row_to_json(daily)), '[]'::json)
+  into _series
+  from daily;
+
+  -- Period totals across delivery states.
+  select json_build_object(
+    'sent', count(*) filter (where m.direction = 'outgoing' and m.status ? 'sent'),
+    'delivered', count(*) filter (where m.status ? 'delivered'),
+    'read', count(*) filter (where m.status ? 'read'),
+    'failed', count(*) filter (where m.status ? 'failed'),
+    'replies', count(*) filter (where m.direction = 'incoming')
+  )
+  into _totals
+  from public.messages m
+  where m.organization_id = p_organization_id
+    and m.timestamp >= p_from
+    and m.timestamp < p_to;
+
+  -- Estimated WhatsApp template spend from the billing ledger.
+  -- Template costs are recorded with provider='whatsapp' and a negative
+  -- quantity (a debit), so the spend is the negated sum.
+  select coalesce(-sum(l.quantity), 0)
+  into _cost
+  from billing.ledger l
+  where l.organization_id = p_organization_id
+    and l.provider = 'whatsapp'
+    and l.type = 'consumption'
+    and l.created_at >= p_from
+    and l.created_at < p_to;
+
+  return json_build_object(
+    'series', _series,
+    'totals', _totals,
+    'estimated_cost', _cost
+  );
+end;
+$$;
